@@ -1,11 +1,14 @@
 mod declarations;
 mod directives;
 mod expressions;
+mod fix;
 mod imports;
 mod layout;
 mod syntax;
 
 pub use directives::Directives;
+use fix::Fix;
+pub use fix::FixPlan;
 
 use clap::builder::PossibleValuesParser;
 use std::collections::HashSet;
@@ -117,7 +120,6 @@ impl Selection {
 pub struct Context<'a> {
     source: &'a str,
     path: &'a Path,
-    root: Node<'a>,
     nodes: Vec<Node<'a>>,
     lines: Vec<&'a str>,
     line_starts: Vec<usize>,
@@ -154,7 +156,6 @@ impl<'a> Context<'a> {
         Self {
             source,
             path,
-            root,
             selection,
             nodes,
             lines,
@@ -170,7 +171,24 @@ impl<'a> Context<'a> {
         self.selection.enabled(rule)
     }
 
-    pub fn check(&self, usage: &crate::index::ImportUsage, out: &mut Findings) -> Directives {
+    fn newline(&self) -> &'static str {
+        if self
+            .source
+            .find('\n')
+            .is_some_and(|offset| self.source[..offset].ends_with('\r'))
+        {
+            "\r\n"
+        } else {
+            "\n"
+        }
+    }
+
+    fn indent(&self, row: usize) -> &'a str {
+        let line = self.lines[row];
+        &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+    }
+
+    pub fn check(&self, out: &mut Findings) -> Directives {
         if self.selection.any(DECLARATIONS) {
             declarations::check(self, out);
         }
@@ -180,31 +198,41 @@ impl<'a> Context<'a> {
         if self.selection.any(LAYOUT) {
             layout::check(self, out);
         }
+        Directives::from_comments(self)
+    }
+
+    pub fn check_imports(&self, usage: &crate::index::ImportUsage, out: &mut Findings) {
         if self.enabled("unused_import") {
             imports::check(self, usage, out);
         }
-        Directives::from_comments(self)
     }
 }
 
-#[derive(Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone)]
 pub struct Finding {
     pub point: Point,
     pub rule: &'static str,
     pub message: String,
+    fix: Option<Fix>,
 }
 
 pub struct Findings<'a> {
     selection: &'a Selection,
+    fixing: bool,
     pub items: Vec<Finding>,
 }
 
 impl<'a> Findings<'a> {
-    pub fn new(selection: &'a Selection) -> Self {
+    pub fn new(selection: &'a Selection, fixing: bool) -> Self {
         Self {
             selection,
+            fixing,
             items: Vec::new(),
         }
+    }
+
+    fn fixing(&self) -> bool {
+        self.fixing
     }
 
     fn at(&mut self, node: Node<'_>, rule: &'static str, message: impl Into<String>) {
@@ -212,11 +240,32 @@ impl<'a> Findings<'a> {
     }
 
     pub fn push(&mut self, point: Point, rule: &'static str, message: impl Into<String>) {
+        self.push_with_fix(point, rule, message, None);
+    }
+
+    fn at_with_fix(
+        &mut self,
+        node: Node<'_>,
+        rule: &'static str,
+        message: impl Into<String>,
+        fix: impl Into<Option<Fix>>,
+    ) {
+        self.push_with_fix(node.start_position(), rule, message, fix);
+    }
+
+    fn push_with_fix(
+        &mut self,
+        point: Point,
+        rule: &'static str,
+        message: impl Into<String>,
+        fix: impl Into<Option<Fix>>,
+    ) {
         if self.selection.enabled(rule) {
             self.items.push(Finding {
                 point,
                 rule,
                 message: message.into(),
+                fix: if self.fixing { fix.into() } else { None },
             });
         }
     }

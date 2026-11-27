@@ -18,12 +18,20 @@ impl SourceFile {
 
     pub fn read(path: &Path, parser: &mut Parser) -> Result<Self, String> {
         let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        Self::parse(source, parser)
+    }
+
+    pub fn parse(source: String, parser: &mut Parser) -> Result<Self, String> {
         let tree = parser.parse(&source, None).ok_or("could not parse Swift")?;
         Ok(Self { source, tree })
     }
 
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    pub fn into_source(self) -> String {
+        self.source
     }
 
     pub fn root(&self) -> Node<'_> {

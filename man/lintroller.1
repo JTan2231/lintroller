@@ -5,6 +5,7 @@ lintroller \- lint Swift sources using a compiler index
 .B lintroller
 .BI \-\-index\-store " DIR"
 .BI \-\-project\-root " DIR"
+.RB [ \-\-fix ]
 .RB [ \-\-rules
 .IR ID[,ID...] ]
 .br
@@ -55,6 +56,13 @@ By default, all supported rules run, including SwiftLint opt-in rules.
 See
 .B \-\-help
 for the supported identifiers.
+.TP
+.B \-\-fix
+Apply available fixes in place to indexed project sources and report remaining
+findings. Use with
+.B \-\-rules
+to limit which rules can make edits. Rebuild the index after sources change
+before running lintroller again.
 .TP
 .BR \-h ", " \-\-help
 Print usage and supported rule identifiers.

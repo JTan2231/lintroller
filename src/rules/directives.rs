@@ -1,5 +1,6 @@
-use super::{Context, Findings};
-use std::collections::{HashMap, HashSet};
+use super::{Context, Findings, Fix};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::Range;
 use tree_sitter::Point;
 
 struct Command {
@@ -10,6 +11,56 @@ struct Command {
     start: Point,
     scoped: bool,
     disable: bool,
+    text: DirectiveText,
+}
+
+struct DirectiveText {
+    marker: usize,
+    args: Range<usize>,
+    comment: Range<usize>,
+}
+
+impl DirectiveText {
+    fn remove(&self, source: &str, rule: &str) -> Option<Fix> {
+        let args = &source[self.args.clone()];
+        let mut words = args.split_whitespace().skip(1);
+        let rules: Vec<_> = words.by_ref().take_while(|&word| word != "-").collect();
+        if rules.iter().all(|&word| word == rule) {
+            let reason = words.next();
+            let end = reason.map_or(self.args.end, |word| {
+                self.args.start + (word.as_ptr() as usize - args.as_ptr() as usize)
+            });
+            if source[end..self.args.end].contains("swiftlint:") {
+                return None;
+            }
+            if reason.is_none() && !source[self.comment.clone()].contains('\n') {
+                let before = source[self.comment.start..self.marker].trim();
+                let after = source[end..self.comment.end].trim();
+                if (before == "//" && after.is_empty()) || (before == "/*" && after == "*/") {
+                    let replacement = if before == "/*"
+                        && self.comment.start > 0
+                        && self.comment.end < source.len()
+                        && !source.as_bytes()[self.comment.start - 1].is_ascii_whitespace()
+                        && !source.as_bytes()[self.comment.end].is_ascii_whitespace()
+                    {
+                        " "
+                    } else {
+                        ""
+                    };
+                    return Some(Fix::replace(self.comment.clone(), replacement));
+                }
+            }
+            return Some(Fix::replace(self.marker..end, ""));
+        }
+
+        let mut ranges = rules.into_iter().filter(|&word| word == rule).map(|word| {
+            let start = word.as_ptr() as usize - args.as_ptr() as usize;
+            let before = args[..start].trim_end().len();
+            self.args.start + before..self.args.start + start + word.len()
+        });
+        let fix = Fix::replace(ranges.next()?, "");
+        Some(ranges.fold(fix, |fix, range| fix.and_replace(range, "")))
+    }
 }
 
 #[derive(Default)]
@@ -56,6 +107,8 @@ impl Directives {
                 };
                 let end = Point::new(row, column + line.len());
                 let args = line[marker + "swiftlint:".len()..].trim_end_matches("*/");
+                let line_start = cx.line_starts[row] + column;
+                let args_start = line_start + marker + "swiftlint:".len();
                 let mut words = args.split_whitespace();
                 let Some(verb) = words.next() else { continue };
                 let (action, scope) = verb.split_once(':').unwrap_or((verb, ""));
@@ -84,6 +137,11 @@ impl Directives {
                         start,
                         scoped: !scope.is_empty(),
                         disable,
+                        text: DirectiveText {
+                            marker: line_start + marker,
+                            args: args_start..args_start + args.len(),
+                            comment: node.byte_range(),
+                        },
                     };
                     let id = result.commands.len();
                     let timeline = result.timelines.entry(rule.into()).or_default();
@@ -102,6 +160,18 @@ impl Directives {
     fn disabling(&self, rule: &str, at: Point) -> Option<usize> {
         let id = self.timelines.get(rule)?.command(at)?;
         self.commands[id].disable.then_some(id)
+    }
+
+    pub(super) fn scoped_rows(&self) -> BTreeSet<usize> {
+        self.commands
+            .iter()
+            .filter(|cmd| cmd.scoped)
+            .flat_map(|cmd| {
+                let comment = cmd.location.row;
+                let target = cmd.start.row;
+                comment.min(target)..=comment.max(target)
+            })
+            .collect()
     }
 
     fn blanket(&self, out: &mut Findings) {
@@ -144,7 +214,7 @@ impl Directives {
 
     // Apply suppression after semantic and syntax findings have been combined.
     // A directive that hides an indexed diagnostic counts as used too.
-    pub fn apply(&self, out: &mut Findings) {
+    pub fn apply(&self, out: &mut Findings, fix_source: Option<&str>) {
         if self.commands.is_empty() {
             return;
         }
@@ -172,13 +242,14 @@ impl Directives {
                     .disabling("superfluous_disable_command", cmd.start)
                     .is_none()
             {
-                out.push(
+                out.push_with_fix(
                     cmd.location,
                     "superfluous_disable_command",
                     format!(
                         "Rule '{}' had no violations in the disabled region",
                         cmd.rule
                     ),
+                    fix_source.and_then(|source| cmd.text.remove(source, &cmd.rule)),
                 );
             }
         }

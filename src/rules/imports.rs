@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::Node;
 
-use super::{Context, Findings};
+use super::{Context, Findings, Fix};
 use crate::index::ImportUsage;
 
 struct Import<'a> {
@@ -64,6 +64,64 @@ fn facade(module: &str) -> Option<&'static str> {
         "SwiftUICore" => Some("SwiftUI"),
         _ => None,
     }
+}
+
+fn remove_plain_import(cx: &Context<'_>, item: &Import<'_>) -> Option<Fix> {
+    let node = item.node;
+    let row = node.start_position().row;
+    let line_start = cx.line_starts[row];
+    let before = &cx.source[line_start..node.start_byte()];
+    let name = cx.text(node).strip_prefix("import")?.trim();
+    if !before.trim().is_empty()
+        || row != node.end_position().row
+        || name.trim_matches('`') != item.module
+    {
+        return None;
+    }
+    let line_end = line_start + cx.lines[row].len();
+    let after = &cx.source[node.end_byte()..line_end];
+    let suffix = after.trim_start();
+    let suffix_start = line_end - suffix.len();
+    if suffix.starts_with("//") {
+        return Some(Fix::replace(node.start_byte()..suffix_start, ""));
+    }
+    if suffix.starts_with("/*") {
+        let mut end = node.end_byte();
+        for comment in
+            std::iter::successors(node.next_named_sibling(), |node| node.next_named_sibling())
+        {
+            if !matches!(comment.kind(), "comment" | "multiline_comment")
+                || comment.start_position().row != row
+                || comment.end_position().row != row
+                || !cx.source[end..comment.start_byte()].trim().is_empty()
+            {
+                break;
+            }
+            end = comment.end_byte() - usize::from(cx.text(comment).ends_with('\r'));
+        }
+        if end < suffix_start || !cx.source[end..line_end].trim().is_empty() {
+            return None;
+        }
+        return Some(Fix::replace(node.start_byte()..suffix_start, ""));
+    }
+    if !suffix.is_empty() && suffix != ";" {
+        return None;
+    }
+    // Keep a line in place when a nearby scoped directive may target it.
+    let nearby_directive = (row.saturating_sub(1)..=row + 1).any(|line| {
+        cx.lines
+            .get(line)
+            .is_some_and(|text| text.contains("swiftlint:"))
+    });
+    let end = if nearby_directive {
+        line_end
+    } else {
+        cx.line_starts
+            .get(row + 1)
+            .copied()
+            .unwrap_or(cx.source.len())
+    };
+    Some(Fix::replace(line_start..end, ""))
 }
 
 pub(super) fn check(cx: &Context<'_>, usage: &ImportUsage, out: &mut Findings) {
@@ -140,10 +198,15 @@ pub(super) fn check(cx: &Context<'_>, usage: &ImportUsage, out: &mut Findings) {
         }
         let always_available = matches!(item.module, "Swift" | "SwiftShims");
         if always_available || !uncertain && !used.contains(item.module) {
-            out.at(
+            let fix = out
+                .fixing()
+                .then(|| remove_plain_import(cx, &item))
+                .flatten();
+            out.at_with_fix(
                 item.node,
                 "unused_import",
                 format!("Unused import of '{}'", item.module),
+                fix,
             );
         }
     }

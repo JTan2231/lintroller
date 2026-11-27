@@ -50,6 +50,18 @@ Sources/Feature.swift:12:6: error: Unused declaration 'obsolete()' (unused_decla
 
 The exit status is **0** for a clean scan, **1** for findings, and **2** for invalid input or a failed scan. Errors go to stderr.
 
+### Apply auto-fixes
+
+Add `--fix` to update indexed Swift files in place and report remaining findings. Combine it with `--rules` to limit the edits to selected rules.
+
+```sh
+lintroller --index-store /path/to/index/store --project-root . --fix --rules number_separator,unused_import
+```
+
+Auto-fixes are available for `attributes`, `closure_end_indentation`, `closure_parameter_position`, `conditional_returns_on_newline`, `explicit_acl`, `file_types_order`, `implicit_return`, `let_var_whitespace`, `multiline_arguments`, `multiline_call_arguments`, `multiline_function_chains`, `multiline_literal_brackets`, `number_separator`, `opening_brace`, `required_deinit`, `superfluous_disable_command`, `switch_case_on_newline`, `trailing_comma`, and `unused_import`. Some findings still require manual edits, for example when moving Swift syntax could change a comment's attachment or a result builder's behavior.
+
+Use a fresh index, especially when fixing unused imports. Rebuild the index after files change before running lintroller again. In fix mode the exit status reflects the remaining findings.
+
 ## Coverage
 
 Use a fresh index from a successful build of the sources at their indexed paths. Include every target and configuration whose uses should count. The two input directories alone cannot identify missing targets or distinguish obsolete build units left in an incremental store.

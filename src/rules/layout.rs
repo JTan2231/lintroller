@@ -1,5 +1,5 @@
-use super::syntax::{ancestors, child, declaration_keyword, named_children};
-use super::{Context, Findings};
+use super::syntax::{ancestors, child, children, declaration_keyword, named_children};
+use super::{Context, Findings, Fix};
 use tree_sitter::{Node, Point};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -139,10 +139,13 @@ pub(super) fn check(cx: &Context<'_>, out: &mut Findings) {
                         node
                     };
                     if token.start_position().row != closure.start_position().row {
-                        out.at(
+                        out.at_with_fix(
                             token,
                             "closure_parameter_position",
                             "Place closure parameters and captures on the opening brace line",
+                            out.fixing()
+                                .then(|| closure_header_fix(cx, closure, token))
+                                .flatten(),
                         );
                     }
                 }
@@ -153,7 +156,7 @@ pub(super) fn check(cx: &Context<'_>, out: &mut Findings) {
                 }
                 if cx.enabled("conditional_returns_on_newline") && node.kind() != "while_statement"
                 {
-                    conditional_return(node, out);
+                    conditional_return(cx, node, out);
                 }
             }
             "value_arguments"
@@ -174,10 +177,12 @@ pub(super) fn check(cx: &Context<'_>, out: &mut Findings) {
                     && let Some(first) = first_item(stmts)
                     && first.start_position().row == colon.end_position().row
                 {
-                    out.at(
+                    let indent = continued_indent(cx, node.start_position().row);
+                    out.at_with_fix(
                         node,
                         "switch_case_on_newline",
                         "Start the switch case body on a new line",
+                        break_before(cx, first.start_byte(), &indent),
                     );
                 }
             }
@@ -206,6 +211,29 @@ fn is_comment(node: Node<'_>) -> bool {
 
 fn first_item(node: Node<'_>) -> Option<Node<'_>> {
     named_children(node).find(|n| !is_comment(*n))
+}
+
+fn continued_indent(cx: &Context<'_>, row: usize) -> String {
+    let indent = cx.indent(row);
+    let step = if indent.ends_with('\t') { "\t" } else { "    " };
+    format!("{indent}{step}")
+}
+
+fn own_line_indent<'a>(cx: &Context<'a>, node: Node<'_>) -> Option<&'a str> {
+    let point = node.start_position();
+    cx.lines.get(point.row)?;
+    let indent = cx.indent(point.row);
+    (point.column == indent.len()).then_some(indent)
+}
+
+fn break_before(cx: &Context<'_>, byte: usize, indent: &str) -> Fix {
+    let start = cx.source[..byte].trim_end_matches([' ', '\t']).len();
+    Fix::replace(start..byte, format!("{}{indent}", cx.newline()))
+}
+
+fn whitespace(gap: &str) -> bool {
+    gap.bytes()
+        .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 fn nesting(node: Node<'_>, out: &mut Findings) {
@@ -430,16 +458,35 @@ fn number_separator(cx: &Context<'_>, node: Node<'_>, out: &mut Findings) {
     if text.starts_with("0x") || text.starts_with("0X") {
         return;
     }
-    let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+    let (mantissa, exponent) = text.split_at(text.find(['e', 'E']).unwrap_or(text.len()));
     let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let mut groups = integer.split('_');
     let first = groups.next().unwrap_or("");
     if first.is_empty() || first.len() > 3 || groups.any(|g| g.len() != 3) || fraction.contains('_')
     {
-        out.at(
+        let fix = if !out.fixing() || integer.is_empty() {
+            None
+        } else {
+            let digits = integer.replace('_', "");
+            let mut normalized = String::with_capacity(text.len());
+            for (index, digit) in digits.bytes().enumerate() {
+                if index != 0 && (digits.len() - index).is_multiple_of(3) {
+                    normalized.push('_');
+                }
+                normalized.push(char::from(digit));
+            }
+            if mantissa.contains('.') {
+                normalized.push('.');
+                normalized.extend(fraction.chars().filter(|&c| c != '_'));
+            }
+            normalized.push_str(exponent);
+            Some(Fix::replace(node.byte_range(), normalized))
+        };
+        out.at_with_fix(
             node,
             "number_separator",
             "Group the integral digits in threes using underscores",
+            fix,
         );
     }
 }
@@ -493,7 +540,7 @@ fn complexity(cx: &Context<'_>, body: Node<'_>, keyword: Node<'_>, out: &mut Fin
     }
 }
 
-fn conditional_return(node: Node<'_>, out: &mut Findings) {
+fn conditional_return(cx: &Context<'_>, node: Node<'_>, out: &mut Findings) {
     let mut keyword_row = node.start_position().row;
     let mut cursor = node.walk();
     for part in node.children(&mut cursor) {
@@ -513,10 +560,12 @@ fn conditional_return(node: Node<'_>, out: &mut Findings) {
             && child(last, "return").is_some()
             && last.start_position().row == keyword_row
         {
-            out.at(
+            let indent = continued_indent(cx, node.start_position().row);
+            out.at_with_fix(
                 node,
                 "conditional_returns_on_newline",
                 "Put a conditional return on a new line",
+                break_before(cx, last.start_byte(), &indent),
             );
             break;
         }
@@ -544,14 +593,55 @@ fn binding_whitespace(cx: &Context<'_>, node: Node<'_>, out: &mut Findings) {
                 .count()
                 < 2
         {
-            out.at(
+            out.at_with_fix(
                 item,
                 "let_var_whitespace",
                 "Separate variables from other declarations with a blank line",
+                out.fixing()
+                    .then(|| binding_separator(cx, prev, item))
+                    .flatten(),
             );
         }
         previous = Some(item);
     }
+}
+
+fn binding_separator(cx: &Context<'_>, previous: Node<'_>, item: Node<'_>) -> Option<Fix> {
+    let mut end = previous.end_byte();
+    let mut next = item;
+    for between in std::iter::successors(previous.next_sibling(), |n| n.next_sibling()) {
+        if between == item {
+            break;
+        }
+        let content = cx.text(between);
+        let trailing_comment = is_comment(between)
+            && between.start_position().row == previous.end_position().row
+            && !content.starts_with("///")
+            && !content.starts_with("/**");
+        if trailing_comment || between.kind() == ";" {
+            end = between.end_byte();
+        } else {
+            next = between;
+            break;
+        }
+    }
+    // A line-comment token can include the first byte of a CRLF terminator.
+    if cx.source[..end].ends_with('\r') && cx.source[end..].starts_with('\n') {
+        end -= 1;
+    }
+    // Swift's automatic semicolon token may be absent from the tree, so use the source gap.
+    let gap = &cx.source[end..next.start_byte()];
+    let start = match gap.find(';') {
+        Some(semi) if whitespace(&gap[..semi]) => end + semi + 1,
+        _ => end,
+    };
+    let range = start..next.start_byte();
+    if !whitespace(&cx.source[range.clone()]) {
+        return None;
+    }
+    let newline = cx.newline();
+    let indent = cx.indent(next.start_position().row);
+    Some(Fix::replace(range, format!("{newline}{newline}{indent}")))
 }
 
 fn collection_literal(cx: &Context<'_>, node: Node<'_>, out: &mut Findings) {
@@ -562,10 +652,11 @@ fn collection_literal(cx: &Context<'_>, node: Node<'_>, out: &mut Findings) {
         let previous = std::iter::successors(close.prev_sibling(), |n| n.prev_sibling())
             .find(|n| !is_comment(*n));
         if let Some(comma) = previous.filter(|n| n.kind() == ",") {
-            out.at(
+            out.at_with_fix(
                 comma,
                 "trailing_comma",
                 "Remove the trailing comma from the collection literal",
+                Fix::replace(comma.byte_range(), ""),
             );
         }
     }
@@ -579,17 +670,31 @@ fn collection_literal(cx: &Context<'_>, node: Node<'_>, out: &mut Findings) {
     let Some(first) = elements.next() else { return };
     let last = elements.last().unwrap_or(first);
     if node.start_position().row == first.start_position().row {
-        out.at(
+        let field = if node.kind() == "dictionary_literal" {
+            "key"
+        } else {
+            "element"
+        };
+        let mut cursor = node.walk();
+        let indent = node
+            .children_by_field_name(field, &mut cursor)
+            .filter(|element| element.start_position().row > first.start_position().row)
+            .find_map(|element| own_line_indent(cx, element))
+            .map(str::to_owned)
+            .unwrap_or_else(|| continued_indent(cx, node.start_position().row));
+        out.at_with_fix(
             first,
             "multiline_literal_brackets",
             "Start multiline literal elements on a new line",
+            break_before(cx, first.start_byte(), &indent),
         );
     }
     if last.end_position().row == close.start_position().row {
-        out.at(
+        out.at_with_fix(
             close,
             "multiline_literal_brackets",
             "Put the closing bracket of a multiline literal on a new line",
+            break_before(cx, close.start_byte(), cx.indent(node.start_position().row)),
         );
     }
 }
@@ -663,7 +768,17 @@ fn opening_braces(cx: &Context<'_>, node: Node<'_>, out: &mut Findings) {
             if prev.end_position().row != brace.start_position().row
                 || &cx.source[before.end_byte()..brace.start_byte()] != " "
             {
-                out.at(brace, "opening_brace", "Place the opening brace on the preceding token’s line with one space before it");
+                let range = before.end_byte()..brace.start_byte();
+                let fix = (before.kind() != "comment"
+                    && prev.end_position().row == before.end_position().row
+                    && whitespace(&cx.source[range.clone()]))
+                .then(|| Fix::replace(range, " "));
+                out.at_with_fix(
+                    brace,
+                    "opening_brace",
+                    "Place the opening brace on the preceding token’s line with one space before it",
+                    fix,
+                );
             }
         }
     }
@@ -742,33 +857,62 @@ fn call_arguments(cx: &Context<'_>, node: Node<'_>, out: &mut Findings) {
                 !matches!(n.kind(), "statements") && !n.kind().ends_with("_declaration")
             })
             .any(|n| matches!(n.kind(), "switch_pattern" | "pattern"));
+    let indent = arguments
+        .iter()
+        .find_map(|&argument| own_line_indent(cx, argument))
+        .map(str::to_owned)
+        .unwrap_or_else(|| continued_indent(cx, node.start_position().row));
     for pair in arguments.windows(2) {
         let previous = pair[0];
         let next = pair[1];
         let same_line = previous.start_position().row == next.start_position().row;
+        let comma = std::iter::successors(previous.next_sibling(), |n| n.next_sibling())
+            .take_while(|n| n.start_byte() < next.start_byte())
+            .find(|n| n.kind() == "," && !n.is_missing());
+        let split = || comma.map(|_| break_before(cx, next.start_byte(), &indent));
         if same_line && cx.enabled("multiline_arguments") {
-            out.at(
+            out.at_with_fix(
                 next,
                 "multiline_arguments",
                 "Place each argument of a multiline call on its own line",
+                split(),
             );
         }
         if call_rule {
-            let comma_on_next_line = !cx.text(previous).ends_with(['}', ']'])
-                && std::iter::successors(previous.next_sibling(), |n| n.next_sibling())
-                    .take_while(|n| n.start_byte() < next.start_byte())
-                    .any(|n| {
-                        n.kind() == "," && n.start_position().row == next.start_position().row
-                    });
-            if same_line || comma_on_next_line {
-                out.at(
+            let misplaced_comma = comma.filter(|comma| {
+                !cx.text(previous).ends_with(['}', ']'])
+                    && comma.start_position().row == next.start_position().row
+            });
+            if same_line || misplaced_comma.is_some() {
+                let fix = if same_line
+                    || misplaced_comma.is_some_and(|comma| {
+                        previous.end_position().row == comma.start_position().row
+                    }) {
+                    split()
+                } else {
+                    misplaced_comma.map(|comma| move_comma(cx, previous, comma))
+                };
+                out.at_with_fix(
                     next,
                     "multiline_call_arguments",
                     "Begin the next argument on a new line after the comma",
+                    fix,
                 );
             }
         }
     }
+}
+
+fn move_comma(cx: &Context<'_>, previous: Node<'_>, comma: Node<'_>) -> Fix {
+    let end = comma.end_byte();
+    // Keep the existing indentation when the leading comma moves off this line.
+    let remove_end = if own_line_indent(cx, comma).is_some() {
+        cx.source.len() - cx.source[end..].trim_start_matches([' ', '\t']).len()
+    } else {
+        end
+    };
+    Fix::replace(previous.end_byte()..previous.end_byte(), ",")
+        .and_replace(comma.start_byte()..remove_end, "")
 }
 
 fn receiver(node: Node<'_>) -> Option<Node<'_>> {
@@ -809,15 +953,22 @@ fn function_chain(cx: &Context<'_>, call: Node<'_>, out: &mut Findings) {
     {
         return;
     }
+    let indent = methods
+        .iter()
+        .rev()
+        .find_map(|&dot| own_line_indent(cx, dot))
+        .map(str::to_owned)
+        .unwrap_or_else(|| continued_indent(cx, first.start_position().row));
     for dot in methods {
         let row = dot.start_position().row;
         if let Some(&start) = cx.line_starts.get(row)
             && !cx.source[start..dot.start_byte()].trim().is_empty()
         {
-            out.at(
+            out.at_with_fix(
                 dot,
                 "multiline_function_chains",
                 "Put each chained call on its own line in a multiline chain",
+                break_before(cx, dot.start_byte(), &indent),
             );
         }
     }
@@ -864,17 +1015,75 @@ fn closure_indentation(cx: &Context<'_>, closure: Node<'_>, out: &mut Findings) 
         }
         _ => closure,
     };
-    if let Some(line) = cx.lines.get(anchor.start_position().row) {
-        let expected = line
-            .bytes()
-            .take_while(|b| matches!(b, b' ' | b'\t'))
-            .count();
-        if expected != close.start_position().column {
-            out.at(
-                close,
-                "closure_end_indentation",
-                format!("Align the closing brace at column {}", expected + 1),
-            );
+    let row = anchor.start_position().row;
+    if cx.lines.get(row).is_none() {
+        return;
+    }
+    let indent = cx.indent(row);
+    let point = close.start_position();
+    if indent.len() != point.column {
+        let fix = if own_line_indent(cx, close).is_some() {
+            Fix::replace(cx.line_starts[point.row]..close.start_byte(), indent)
+        } else {
+            break_before(cx, close.start_byte(), indent)
+        };
+        out.at_with_fix(
+            close,
+            "closure_end_indentation",
+            format!("Align the closing brace at column {}", indent.len() + 1),
+            fix,
+        );
+    }
+}
+
+fn closure_header_fix(cx: &Context<'_>, closure: Node<'_>, target: Node<'_>) -> Option<Fix> {
+    let end = child(closure, "in")?;
+    let mut parts = Vec::new();
+    for part in children(closure).take_while(|n| n.start_byte() <= end.start_byte()) {
+        closure_header_parts(part, &mut parts);
+    }
+
+    let mut fix: Option<Fix> = None;
+    let mut reached_target = false;
+    for pair in parts.windows(2) {
+        let [left, right] = [pair[0], pair[1]];
+        if left.start_position().row != left.end_position().row || right.has_error() {
+            break;
         }
+        if left.end_position().row != right.start_position().row {
+            let range = left.end_byte()..right.start_byte();
+            if left.kind() == "comment" || !whitespace(&cx.source[range.clone()]) {
+                break;
+            }
+            let separator =
+                if matches!(left.kind(), "[" | "(") || matches!(right.kind(), "," | ")" | "]") {
+                    ""
+                } else {
+                    " "
+                };
+            fix = Some(match fix {
+                Some(fix) => fix.and_replace(range, separator),
+                None => Fix::replace(range, separator),
+            });
+        }
+        reached_target |= right == target;
+    }
+    fix.filter(|_| reached_target)
+}
+
+fn closure_header_parts<'a>(node: Node<'a>, parts: &mut Vec<Node<'a>>) {
+    // Keep parameter types and capture initializers intact, even when they span lines.
+    if matches!(
+        node.kind(),
+        "capture_list"
+            | "capture_list_item"
+            | "lambda_function_type"
+            | "lambda_function_type_parameters"
+    ) {
+        for child in children(node) {
+            closure_header_parts(child, parts);
+        }
+    } else {
+        parts.push(node);
     }
 }

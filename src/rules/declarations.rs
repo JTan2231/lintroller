@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use tree_sitter::{Node, Point};
 
 use super::syntax::{ancestors, child, children, declaration_keyword, named_children};
-use super::{Context, Findings};
+use super::{Context, Findings, Fix};
 
 fn is_group(node: Node<'_>) -> bool {
     matches!(node.kind(), "class_declaration" | "protocol_declaration")
@@ -230,10 +231,16 @@ fn inspect_declaration_access(cx: &Context<'_>, out: &mut Findings, node: Node<'
                     || access(cx, p).is_some_and(|acl| acl <= Access::Fileprivate)
             })
         {
-            out.at(
+            let fix = if out.fixing() {
+                explicit_access_fix(cx, node)
+            } else {
+                None
+            };
+            out.at_with_fix(
                 declaration_keyword(node),
                 "explicit_acl",
                 "Specify an explicit access control level",
+                fix,
             );
         }
     }
@@ -260,6 +267,24 @@ fn inspect_declaration_access(cx: &Context<'_>, out: &mut Findings, node: Node<'
             "Document this public declaration",
         );
     }
+}
+
+fn explicit_access_fix(cx: &Context<'_>, node: Node<'_>) -> Option<Fix> {
+    if node.has_error()
+        || has_modifier(cx, node, "override")
+        || !node.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                "source_file" | "class_body" | "enum_class_body"
+            )
+        })
+    {
+        return None;
+    }
+    let target = modifiers(node)
+        .find(|modifier| modifier.kind() != "attribute" && !modifier.is_extra())
+        .unwrap_or_else(|| declaration_keyword(node));
+    (target != node).then(|| Fix::replace(target.start_byte()..target.start_byte(), "internal "))
 }
 
 fn has_docs(cx: &Context<'_>, node: Node<'_>) -> bool {
@@ -349,13 +374,16 @@ fn inspect_attributes(cx: &Context<'_>, out: &mut Findings, node: Node<'_>) {
     let mut dedicated_end = None;
     let mut previous_end = None;
     let mut invalid = false;
-    for attr in modifiers(node).filter(|m| m.kind() == "attribute") {
+    let header: Vec<_> = modifiers(node).filter(|m| !m.is_extra()).collect();
+    let on_declaration_line = |attr| {
+        matches!(attribute_name(cx, attr), "IBAction" | "NSManaged")
+            || (same_line && !children(attr).any(|c| c.kind() == "("))
+    };
+    for &attr in header.iter().filter(|m| m.kind() == "attribute") {
         let start = attr.start_position().row;
         let end = attr.end_position().row;
-        let on_line = matches!(attribute_name(cx, attr), "IBAction" | "NSManaged")
-            || (same_line && !children(attr).any(|c| c.kind() == "("));
         invalid |= previous_end.is_some_and(|prev| start > prev + 1);
-        if on_line {
+        if on_declaration_line(attr) {
             invalid |= start != line;
         } else {
             invalid |= start == line || dedicated_end == Some(start);
@@ -364,12 +392,92 @@ fn inspect_attributes(cx: &Context<'_>, out: &mut Findings, node: Node<'_>) {
         previous_end = Some(end);
     }
     if invalid || dedicated_end.is_some_and(|end| end + 1 != line) {
-        out.at(
+        let fix = if out.fixing() && !node.has_error() && token != node {
+            attribute_fix(cx, &header, token, on_declaration_line)
+        } else {
+            None
+        };
+        out.at_with_fix(
             token,
             "attributes",
             "Place declaration attributes on the appropriate line",
+            fix,
         );
     }
+}
+
+fn attribute_fix<'a>(
+    cx: &Context<'_>,
+    header: &[Node<'a>],
+    token: Node<'a>,
+    on_declaration_line: impl Fn(Node<'a>) -> bool,
+) -> Option<Fix> {
+    let first = header.first()?;
+    if cx
+        .source
+        .get(first.start_byte()..token.start_byte())?
+        .contains("swiftlint:")
+    {
+        return None;
+    }
+    let mut declaration_line = false;
+    let mut fix: Option<Fix> = None;
+    let indent = cx.indent(first.start_position().row);
+    let newline = format!("{}{}", cx.newline(), indent);
+    for (&left, right) in header
+        .iter()
+        .zip(header.iter().skip(1).copied().chain([token]))
+    {
+        let dedicated = left.kind() == "attribute" && !on_declaration_line(left);
+        if dedicated && declaration_line
+            || !dedicated && left.start_position().row != left.end_position().row
+        {
+            return None;
+        }
+        declaration_line |= !dedicated;
+        if !dedicated && left.end_position().row == right.start_position().row {
+            continue;
+        }
+        let end = attribute_line_end(cx, left, right, dedicated)?;
+        let range = end..right.start_byte();
+        let replacement = if dedicated { newline.as_str() } else { " " };
+        let between = cx.source.get(range.clone())?;
+        if !between.chars().all(char::is_whitespace) {
+            return None;
+        }
+        if between != replacement {
+            fix = Some(match fix {
+                Some(fix) => fix.and_replace(range, replacement),
+                None => Fix::replace(range, replacement),
+            });
+        }
+    }
+    fix
+}
+
+fn attribute_line_end(
+    cx: &Context<'_>,
+    left: Node<'_>,
+    right: Node<'_>,
+    keep_newline: bool,
+) -> Option<usize> {
+    let mut end = left.end_byte();
+    let first = cx.nodes.partition_point(|node| node.start_byte() < end);
+    for &comment in cx.nodes[first..]
+        .iter()
+        .take_while(|node| node.start_byte() < right.start_byte())
+        .filter(|node| matches!(node.kind(), "comment" | "multiline_comment"))
+    {
+        if comment.start_position().row != left.end_position().row
+            || comment.end_position().row != left.end_position().row
+            || !keep_newline && comment.kind() == "comment"
+            || !cx.source[end..comment.start_byte()].trim().is_empty()
+        {
+            return None;
+        }
+        end = comment.end_byte() - usize::from(cx.text(comment).ends_with('\r'));
+    }
+    Some(end)
 }
 
 fn inspect_bindings(out: &mut Findings, node: Node<'_>) {
@@ -527,17 +635,23 @@ fn inspect_group(cx: &Context<'_>, out: &mut Findings, node: Node<'_>) {
         && group_kind(node) == "class"
         && child(body, "deinit_declaration").is_none()
     {
-        out.at(
+        let fix = if out.fixing() {
+            deinit_fix(cx, node, body)
+        } else {
+            None
+        };
+        out.at_with_fix(
             declaration_keyword(node),
             "required_deinit",
             "Declare an explicit deinitializer for this class",
+            fix,
         );
     }
     if cx.enabled("type_contents_order") {
         let items: Vec<_> = named_children(body)
             .filter_map(|m| member_category(cx, m))
             .collect();
-        check_order(out, &items, "type_contents_order", MEMBER_ORDER);
+        check_order(out, &items, "type_contents_order", MEMBER_ORDER, |_| None);
     }
     if cx.enabled("sorted_enum_cases")
         && group_kind(node) == "enum"
@@ -548,6 +662,60 @@ fn inspect_group(cx: &Context<'_>, out: &mut Findings, node: Node<'_>) {
     {
         inspect_cases(cx, out, body);
     }
+}
+
+fn deinit_fix(cx: &Context<'_>, declaration: Node<'_>, body: Node<'_>) -> Option<Fix> {
+    if body.has_error() {
+        return None;
+    }
+    let open = child(body, "{")?;
+    let close = child(body, "}")?;
+    let row = close.start_position().row;
+    let line_start = cx.line_starts[row];
+    let base = cx.indent(declaration.start_position().row);
+    let nested = named_children(body)
+        .filter(|node| node.kind() != "directive")
+        .filter_map(|node| {
+            let at = node.start_position();
+            let indent = cx.indent(at.row);
+            (indent.len() == at.column)
+                .then(|| indent.strip_prefix(base))
+                .flatten()
+                .filter(|step| !step.is_empty())
+        })
+        .min_by_key(|step| step.len())
+        .unwrap_or(if base.contains('\t') { "\t" } else { "    " });
+    let newline = cx.newline();
+    let before_close = &cx.source[line_start..close.start_byte()];
+    let (start, end, first_newline, close_indent) = if before_close.trim().is_empty() {
+        (line_start, line_start, "", "")
+    } else {
+        let content = before_close.trim_end_matches([' ', '\t']);
+        (
+            line_start + content.len(),
+            close.start_byte(),
+            newline,
+            base,
+        )
+    };
+    let nonempty = !cx.source[open.end_byte()..close.start_byte()]
+        .trim()
+        .is_empty();
+    let already_separated = start == line_start
+        && row
+            .checked_sub(1)
+            .is_some_and(|previous| cx.lines[previous].trim().is_empty());
+    let separator = if nonempty && !already_separated {
+        newline
+    } else {
+        ""
+    };
+    let member = format!(
+        "{first_newline}{separator}{base}{nested}deinit {{{newline}\
+         {base}{nested}{nested}// No explicit cleanup is required.{newline}\
+         {base}{nested}}}{newline}{close_indent}"
+    );
+    Some(Fix::replace(start..end, member))
 }
 
 const MEMBER_ORDER: &[&str] = &[
@@ -639,18 +807,20 @@ fn check_order(
     items: &[(Node<'_>, usize)],
     rule: &'static str,
     categories: &[&str],
+    mut fix_for: impl FnMut(usize) -> Option<Fix>,
 ) {
     // A member is misplaced if a member of any earlier category still follows.
     let mut earliest = categories.len();
-    for &(token, category) in items.iter().rev() {
+    for (index, &(token, category)) in items.iter().enumerate().rev() {
         if category > earliest {
-            out.at(
+            out.at_with_fix(
                 token,
                 rule,
                 format!(
                     "Place {} after {}",
                     categories[category], categories[earliest]
                 ),
+                fix_for(index),
             );
         }
         earliest = earliest.min(category);
@@ -786,7 +956,10 @@ fn inspect_file(cx: &Context<'_>, out: &mut Findings, groups: &[Node<'_>]) {
 
 fn inspect_file_order(cx: &Context<'_>, out: &mut Findings, decls: &[Node<'_>], stem: &str) {
     let mut longest = None;
+    let mut longest_tied = false;
     let mut by_name = None;
+    let mut name_tied = false;
+    let mut matching_extension = false;
     let mut items = Vec::with_capacity(decls.len());
     for (index, &decl) in decls.iter().enumerate() {
         let kind = group_kind(decl);
@@ -799,8 +972,14 @@ fn inspect_file_order(cx: &Context<'_>, out: &mut Findings, decls: &[Node<'_>], 
         } else {
             0
         };
-        if by_name.is_none() && name(decl).is_some_and(|n| cx.text(n) == stem) {
-            by_name = Some(index);
+        if name(decl).is_some_and(|n| cx.text(n) == stem) {
+            if category == 2 {
+                matching_extension = true;
+            } else if by_name.is_some() {
+                name_tied = true;
+            } else {
+                by_name = Some(index);
+            }
         }
         if category == 0 && matches!(kind, "actor" | "class" | "enum" | "struct") {
             let length = decl
@@ -808,16 +987,162 @@ fn inspect_file_order(cx: &Context<'_>, out: &mut Findings, decls: &[Node<'_>], 
                 .map_or(0, |n| n.end_byte() - n.start_byte());
             if longest.is_none_or(|(_, size)| length > size) {
                 longest = Some((index, length));
+                longest_tied = false;
+            } else if longest.is_some_and(|(_, size)| length == size) {
+                longest_tied = true;
             }
         }
         items.push((declaration_keyword(decl), category));
     }
-    if let Some(main) = by_name.or_else(|| longest.map(|(i, _)| i)) {
-        if items[main].1 != 2 {
-            items[main].1 = 1;
-            check_order(out, &items, "file_types_order", FILE_ORDER);
+    // A matching extension identifies an extension file unless the primary
+    // declaration itself also appears here.
+    let main = by_name.or_else(|| longest.map(|(i, _)| i).filter(|_| !matching_extension));
+    if let Some(main) = main {
+        items[main].1 = 1;
+        let main_unambiguous = if by_name.is_some() {
+            !name_tied
+        } else {
+            !longest_tied
+        };
+        let mut fixes = if out.fixing()
+            && main_unambiguous
+            && items.windows(2).any(|pair| pair[0].1 > pair[1].1)
+        {
+            file_order_fixes(cx, decls, &items)
+        } else {
+            HashMap::new()
+        };
+        check_order(out, &items, "file_types_order", FILE_ORDER, |index| {
+            fixes.remove(&index)
+        });
+    }
+}
+
+fn file_order_fixes(
+    cx: &Context<'_>,
+    decls: &[Node<'_>],
+    items: &[(Node<'_>, usize)],
+) -> HashMap<usize, Fix> {
+    let mut fixes = HashMap::new();
+    let mut run: Vec<(usize, Range<usize>)> = Vec::new();
+    for (index, &decl) in decls.iter().enumerate() {
+        let span = declaration_span(cx, decl);
+        // A directive, unattached comment, or another statement breaks the run.
+        let continues = run
+            .last()
+            .zip(span.as_ref())
+            .is_some_and(|((_, previous), next)| {
+                cx.source
+                    .get(previous.end..next.start)
+                    .is_some_and(|gap| gap.trim().is_empty())
+            });
+        if !continues {
+            sort_file_run(cx, &run, items, &mut fixes);
+            run.clear();
+        }
+        if let Some(span) = span {
+            run.push((index, span));
         }
     }
+    sort_file_run(cx, &run, items, &mut fixes);
+    fixes
+}
+
+fn sort_file_run(
+    cx: &Context<'_>,
+    run: &[(usize, Range<usize>)],
+    items: &[(Node<'_>, usize)],
+    fixes: &mut HashMap<usize, Fix>,
+) {
+    if run.is_empty()
+        || run
+            .windows(2)
+            .all(|pair| items[pair[0].0].1 <= items[pair[1].0].1)
+    {
+        return;
+    }
+    let mut sorted: Vec<_> = run.iter().collect();
+    sorted.sort_by_key(|(index, _)| items[*index].1);
+    let mut edits = run.iter().zip(sorted).filter(|(from, to)| from.0 != to.0);
+    let Some((slot, declaration)) = edits.next() else {
+        return;
+    };
+    let fix = Fix::copy(slot.1.clone(), declaration.1.clone(), cx.source);
+    let fix = edits.fold(fix, |fix, (slot, declaration)| {
+        fix.and_copy(slot.1.clone(), declaration.1.clone(), cx.source)
+    });
+
+    let mut earliest = FILE_ORDER.len();
+    for (index, _) in run.iter().rev() {
+        let category = items[*index].1;
+        if category > earliest {
+            fixes.insert(*index, fix.clone());
+        }
+        earliest = earliest.min(category);
+    }
+}
+
+fn declaration_span(cx: &Context<'_>, decl: Node<'_>) -> Option<Range<usize>> {
+    fn is_comment(node: Node<'_>) -> bool {
+        matches!(node.kind(), "comment" | "multiline_comment")
+    }
+
+    if decl.has_error() {
+        return None;
+    }
+    let mut first = decl;
+    while let Some(comment) = first.prev_named_sibling().filter(|node| is_comment(*node)) {
+        let line_start = cx.line_starts[comment.start_position().row];
+        if first.start_position().row > comment.end_position().row + 1
+            || !cx.source[comment.end_byte()..first.start_byte()]
+                .trim()
+                .is_empty()
+            || !cx.source[line_start..comment.start_byte()]
+                .trim()
+                .is_empty()
+        {
+            break;
+        }
+        first = comment;
+    }
+    let mut last = decl;
+    while let Some(comment) = last.next_named_sibling().filter(|node| is_comment(*node)) {
+        if last.end_position().row != comment.start_position().row
+            || !cx.source[last.end_byte()..comment.start_byte()]
+                .trim()
+                .is_empty()
+        {
+            break;
+        }
+        last = comment;
+    }
+    let start = cx.line_starts[first.start_position().row];
+    let end = last.end_byte() - usize::from(cx.text(last).ends_with('\r'));
+    let line_end = cx
+        .line_starts
+        .get(last.end_position().row + 1)
+        .copied()
+        .unwrap_or(cx.source.len());
+    let previous_directive = first.prev_named_sibling().is_some_and(|previous| {
+        is_comment(previous)
+            && first.start_position().row <= previous.end_position().row + 1
+            && cx.text(previous).contains("swiftlint:")
+    });
+    let next_directive = last.next_named_sibling().is_some_and(|next| {
+        is_comment(next)
+            && next.start_position().row == last.end_position().row + 1
+            && cx.text(next).contains("swiftlint:")
+    });
+    if previous_directive
+        || next_directive
+        || !cx.source[start..first.start_byte()].trim().is_empty()
+        || !cx.source[end..line_end].trim().is_empty()
+        || cx.source[start..end].contains("swiftlint:")
+        || cx.source[start..end].contains("#sourceLocation")
+    {
+        return None;
+    }
+    Some(start..end)
 }
 
 // SwiftLint exempts fileprivate protocol witnesses when the protocol and the

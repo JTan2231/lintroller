@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 use super::syntax::{ancestors, child, children, syntax_children};
-use super::{Context, Findings};
+use super::{Context, Findings, Fix};
 
 fn owner(node: Node<'_>) -> Option<Node<'_>> {
     ancestors(node).find(|n| matches!(n.kind(), "class_declaration" | "protocol_declaration"))
@@ -159,7 +159,7 @@ pub(super) fn check(cx: &Context<'_>, out: &mut Findings) {
                 }
                 conditions(out, node);
             }
-            "statements" => implicit_return(out, node),
+            "statements" if cx.enabled("implicit_return") => implicit_return(cx, out, node),
             "switch_pattern" => optional_case(cx, out, node),
             "property_declaration" => private_state(cx, out, node),
             "class_declaration"
@@ -623,7 +623,7 @@ fn empty_block(out: &mut Findings, node: Node<'_>) {
     }
 }
 
-fn implicit_return(out: &mut Findings, node: Node<'_>) {
+fn implicit_return(cx: &Context<'_>, out: &mut Findings, node: Node<'_>) {
     let mut items = syntax_children(node);
     let Some(statement) = items.next() else {
         return;
@@ -643,12 +643,84 @@ fn implicit_return(out: &mut Findings, node: Node<'_>) {
         _ => false,
     };
     if eligible && !ancestors(node).any(|n| n.kind() == "protocol_declaration") {
-        out.at(
+        let fix = out
+            .fixing()
+            .then(|| implicit_return_fix(cx, parent, statement, keyword))
+            .flatten();
+        out.at_with_fix(
             keyword,
             "implicit_return",
             "Omit return from this single-statement body",
+            fix,
         );
     }
+}
+
+fn implicit_return_fix(
+    cx: &Context<'_>,
+    body: Node<'_>,
+    statement: Node<'_>,
+    keyword: Node<'_>,
+) -> Option<Fix> {
+    let result = statement.child_by_field_name("result")?;
+    let declaration = match body.kind() {
+        "computed_getter" => body.parent()?.parent()?,
+        "computed_property" | "function_body" => body.parent()?,
+        // A call argument's expected type can introduce a result builder.
+        // A closure used as a plain variable initializer has no such context.
+        "lambda_literal" => body.parent().filter(|parent| {
+            parent.kind() == "property_declaration"
+                && parent.child_by_field_name("value") == Some(body)
+        })?,
+        _ => return None,
+    };
+    if statement.has_error()
+        || declaration.kind() == "init_declaration"
+        || declaration
+            .parent()
+            .filter(|n| member_scope(*n))
+            .and_then(|n| n.parent())
+            .is_some_and(|group| child(group, "inheritance_specifier").is_some())
+    {
+        return None;
+    }
+
+    // Explicit return disables result builder transformations. A custom
+    // attribute or a protocol witness can introduce one from another file.
+    let attributes = [declaration, body].into_iter().flat_map(|node| {
+        syntax_children(node)
+            .filter(|n| n.kind() == "attribute")
+            .chain(
+                child(node, "modifiers")
+                    .into_iter()
+                    .flat_map(syntax_children)
+                    .filter(|n| n.kind() == "attribute"),
+            )
+    });
+    for attr in attributes {
+        let name = child(attr, "user_type").map(|n| cx.text(n));
+        if !matches!(
+            name,
+            Some(
+                "available"
+                    | "discardableResult"
+                    | "inlinable"
+                    | "inline"
+                    | "nonobjc"
+                    | "objc"
+                    | "usableFromInline"
+            )
+        ) {
+            return None;
+        }
+    }
+
+    let gap = cx.source.get(keyword.end_byte()..result.start_byte())?;
+    let space = gap.len() - gap.trim_start_matches([' ', '\t']).len();
+    Some(Fix::replace(
+        keyword.start_byte()..keyword.end_byte() + space,
+        "",
+    ))
 }
 
 fn key_path(cx: &Context<'_>, out: &mut Findings, node: Node<'_>) {
