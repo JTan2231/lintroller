@@ -1,0 +1,3 @@
+FeatureCodes.swift	blanket_disable_command	// swiftlint:disable implicit_return	implicit_return
+FeatureCodes.swift	superfluous_disable_command	// swiftlint:disable:next line_length	line_length
+FeatureCodes.swift	no_magic_numbers	return reserved || code == 19	19

@@ -1,0 +1,19 @@
+DeclInventoryDraft.swift	file_name	internal final class DeclInventory	internal
+DeclInventoryDraft.swift	file_types_order	internal final class DeclInventory	class
+DeclInventoryDraft.swift	required_deinit	internal final class DeclInventory	class
+DeclInventoryDraft.swift	lower_acl_than_parent	public func label	public
+DeclInventoryDraft.swift	missing_docs	public func label	func
+DeclInventoryDraft.swift	type_contents_order	public func label	func
+DeclInventoryDraft.swift	redundant_type_annotation	let result: String	: String
+DeclInventoryDraft.swift	strict_fileprivate	fileprivate let fallback	fileprivate
+DeclInventoryDraft.swift	explicit_type_interface	fileprivate let fallback	fallback
+DeclInventoryDraft.swift	explicit_acl	enum declPhase	enum
+DeclInventoryDraft.swift	one_declaration_per_file	enum declPhase	enum
+DeclInventoryDraft.swift	type_name	enum declPhase	declPhase
+DeclInventoryDraft.swift	sorted_enum_cases	case waiting	case
+DeclInventoryDraft.swift	sorted_enum_cases	case active	case
+DeclInventoryDraft.swift	no_grouping_extension	extension DeclInventory	extension
+DeclInventoryDraft.swift	attributes	@inline(never) internal func accepts	func
+DeclInventoryDraft.swift	discouraged_default_parameter	@inline(never) internal func accepts	= nil
+DeclInventoryDraft.swift	discouraged_optional_boolean	@inline(never) internal func accepts	Bool?
+DeclInventoryDraft.swift	discouraged_optional_collection	@inline(never) internal func accepts	[String]?

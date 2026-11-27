@@ -1,0 +1,21 @@
+LayoutFileSize.swift	file_length	@line:401	@column:1
+LayoutFileSize.swift	line_length	// Width boundary	@column:1
+LayoutBoundaries.swift	function_body_length	public func layoutLongFunction	func
+LayoutBoundaries.swift	closure_body_length	let emit: () -> Void = {	{
+LayoutBoundaries.swift	cyclomatic_complexity	public func layoutBranches	func
+LayoutBody.swift	type_body_length	public enum LayoutBody	enum
+LayoutEnvelope.swift	nesting	public enum Details	enum
+LayoutFormatting.swift	opening_brace	@line:3	{
+LayoutFormatting.swift	indentation_width	print(layoutCapacity)	@column:1
+LayoutFormatting.swift	conditional_returns_on_newline	if enabled { return input }	if
+LayoutFormatting.swift	multiline_literal_brackets	let bounds: [Int] = [0,	0
+LayoutFormatting.swift	trailing_comma	1,	,
+LayoutFormatting.swift	multiline_arguments	enabled, input,	input
+LayoutFormatting.swift	multiline_call_arguments	enabled, input,	input
+LayoutFormatting.swift	multiline_function_chains	_ = input.sorted().reversed()	.reversed()
+LayoutFormatting.swift	switch_case_on_newline	case true: print(input)	case
+LayoutFormatting.swift	closure_parameter_position	element in	element
+LayoutFormatting.swift	closure_end_indentation	End of transformation	}
+LayoutFormatting.swift	let_var_whitespace	internal let layoutCapacity	internal
+LayoutFormatting.swift	number_separator	internal let layoutCapacity	1000
+LayoutFormatting.swift	orphaned_doc_comment	Detached documentation.	///

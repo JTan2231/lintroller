@@ -1,0 +1,18 @@
+ExpressionView.swift	private_swiftui_state	@State internal var	internal
+ExpressionView.swift	accessibility_label_for_image	Image(iconName)	Image
+ExpressionView.swift	accessibility_trait_for_button	Image(iconName)	Image
+ExpressionSample.swift	unneeded_synthesized_initializer	internal init(count: Int)	internal
+ExpressionSample.swift	prefer_self_in_static_references	ExpressionSample(count: 0)	ExpressionSample
+ExpressionExamples.swift	legacy_objc_type	_ value: NSString	NSString
+ExpressionExamples.swift	implicit_return	return value + 12	return
+ExpressionExamples.swift	no_magic_numbers	return value + 12	12
+ExpressionExamples.swift	trailing_closure	values.filter({	{
+ExpressionExamples.swift	anonymous_argument_in_multiline_closure	$0 > 0	$0
+ExpressionExamples.swift	prefer_key_path	words.map {	{
+ExpressionExamples.swift	multiple_closures_with_trailing_closure	expressionCombine({ 0 }) { 1 }	{ 1 }
+ExpressionExamples.swift	prefer_condition_list	if allowed && ready	&&
+ExpressionExamples.swift	variable_shadowing	let input: Int = 0	input
+ExpressionExamples.swift	no_empty_block	expressionPerform(_ operation	{}
+ExpressionExamples.swift	function_parameter_count	public func expressionSum(	func
+ExpressionExamples.swift	function_default_parameter_at_end	offset: Int = 0	offset
+ExpressionExamples.swift	optional_enum_case_matching	case .minus?:	?

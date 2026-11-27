@@ -1,29 +1,10 @@
-use std::env;
+mod common;
+
+use common::TempDir;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
-use std::process::{self, Command};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> io::Result<Self> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = env::temp_dir().join(format!("lintroller-{}-{nonce}", process::id()));
-        fs::create_dir(&path)?;
-        Ok(Self(path.canonicalize()?))
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 #[test]
 fn finds_exactly_21_unused_declarations_in_a_hundred_file_project() -> io::Result<()> {
