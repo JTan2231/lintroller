@@ -7,12 +7,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
     println!("cargo:rerun-if-env-changed=TOOLCHAINS");
     println!("cargo:rerun-if-env-changed=INDEXSTORE_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=PATH");
 
     let library_dir = env::var_os("INDEXSTORE_LIB_DIR").map(PathBuf::from).unwrap_or_else(|| {
         let output = if cfg!(target_os = "macos") {
             Command::new("xcrun").args(["--find", "swiftc"]).output()
         } else {
-            Command::new("which").arg("swiftc").output()
+            Command::new("sh").args(["-c", "command -v swiftc"]).output()
         }
         .expect("Install the Swift toolchain or set INDEXSTORE_LIB_DIR");
         assert!(output.status.success(), "Could not locate swiftc. Set INDEXSTORE_LIB_DIR to the directory containing libIndexStore");

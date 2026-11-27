@@ -2,20 +2,33 @@
 
 `lintroller` runs 61 SwiftLint rules on the Swift files in a compiler index. Source rules share one syntax tree per file. The two analyzer rules, `unused_declaration` and `unused_import`, also use compiler symbol references.
 
-## Usage
+## Installation
 
-Build the CLI with Cargo and the Swift toolchain that produced the index. Cargo locates `libIndexStore` via `xcrun` on macOS or `swiftc` on `PATH` on Linux. To select a specific library, set `INDEXSTORE_LIB_DIR` when building the CLI.
+From a checkout, run `./install.sh`. The script builds from source and installs `lintroller` in `$HOME/.local/bin` using your user account. If your shell cannot find `lintroller`, run the following in a POSIX shell. Add the same line to your shell’s startup file to keep it in future sessions.
 
 ```sh
-cargo build --release
-./target/release/lintroller --index-store /path/to/index/store --project-root /path/to/project
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+You need Rust and Cargo, a C compiler, and Swift’s `libIndexStore`. The build finds the library using `xcrun` on macOS or `swiftc` on `PATH` on other Unix systems. If `swiftc` is unavailable, pass the absolute path to the directory containing the library. Keep that library in place for the installed CLI.
+
+```sh
+INDEXSTORE_LIB_DIR=/path/to/toolchain/usr/lib ./install.sh
+```
+
+On Linux with Swiftly, run `swiftly run ./install.sh` to build with the selected toolchain. See the [Swiftly CLI reference](https://www.swift.org/swiftly/documentation/swiftly/swiftly-cli-reference/#run).
+
+## Usage
+
+```sh
+lintroller --index-store /path/to/index/store --project-root /path/to/project
 ```
 
 Both directories are required. Pass the directory given to `swiftc -index-store-path`, the one containing the versioned store (typically `v5/`). From a Swift package directory, these commands include test callers in the scan.
 
 ```sh
 swift build --build-tests --enable-index-store
-/path/to/lintroller --index-store "$(swift build --show-bin-path)/index/store" --project-root .
+lintroller --index-store "$(swift build --show-bin-path)/index/store" --project-root .
 ```
 
 All 61 rules run by default, including SwiftLint opt-in rules. Use `--rules` to select a comma-separated list or repeat the flag. The CLI's `--help` lists the supported identifiers.
