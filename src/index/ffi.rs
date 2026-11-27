@@ -83,6 +83,7 @@ unsafe extern "C" {
     ) -> Handle;
     pub fn indexstore_unit_reader_dispose(unit: Handle);
     pub fn indexstore_unit_reader_is_system_unit(unit: Handle) -> bool;
+    pub fn indexstore_unit_reader_get_module_name(unit: Handle) -> StringRef;
     pub fn indexstore_unit_reader_get_working_dir(unit: Handle) -> StringRef;
     pub fn indexstore_unit_reader_get_modification_time(
         unit: Handle,

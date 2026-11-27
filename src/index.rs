@@ -1,8 +1,10 @@
 mod ffi;
+mod imports;
 
-use crate::policy::SourceFile;
+pub use imports::ImportUsage;
+
 use ffi::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{CString, OsStr};
 use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Path, PathBuf};
@@ -25,44 +27,40 @@ struct Symbols {
     declarations: HashMap<Declaration, Vec<Vec<u8>>>,
 }
 
-struct TypeReference {
-    usr: Vec<u8>,
-    line: u32,
-    column: u32,
+pub struct TypeReference {
+    pub usr: Vec<u8>,
+    pub line: u32,
+    pub column: u32,
+}
+
+#[derive(Default)]
+pub struct IndexedFile {
+    pub candidates: Vec<(Declaration, Vec<Vec<u8>>)>,
+    pub bare_types: Vec<TypeReference>,
+    pub imports: ImportUsage,
 }
 
 impl Symbols {
-    fn resolve_bare_types(&mut self) -> Result<(), String> {
-        let candidates: HashSet<&[u8]> = self
+    fn distribute(mut self, files: &mut BTreeMap<PathBuf, IndexedFile>) {
+        self.declarations
+            .retain(|_, usrs| usrs.iter().all(|u| !self.used.contains(u)));
+        let pending: HashSet<&[u8]> = self
             .declarations
             .values()
             .flatten()
             .map(Vec::as_slice)
-            .filter(|usr| !self.used.contains(*usr))
             .collect();
-        for (path, references) in &self.bare_types {
-            let mut source = None;
-            for reference in references {
-                if !candidates.contains(reference.usr.as_slice())
-                    || self.used.contains(&reference.usr)
-                {
-                    continue;
-                }
-                if source.is_none() {
-                    source = Some(
-                        SourceFile::read(path).map_err(|e| format!("{}: {e}", path.display()))?,
-                    );
-                }
-                if !source
-                    .as_ref()
-                    .unwrap()
-                    .is_extension_target(reference.line, reference.column)
-                {
-                    self.used.insert(reference.usr.clone());
-                }
-            }
+        for (path, mut references) in self.bare_types {
+            references.retain(|r| pending.contains(r.usr.as_slice()));
+            files.get_mut(&path).unwrap().bare_types = references;
         }
-        Ok(())
+        for (decl, usrs) in self.declarations {
+            files
+                .get_mut(&decl.path)
+                .unwrap()
+                .candidates
+                .push((decl, usrs));
+        }
     }
 
     fn retain(&mut self, usr: &[u8]) {
@@ -76,6 +74,8 @@ impl Symbols {
         occ: Handle,
         paths: &[PathBuf],
         has_external_file: bool,
+        imports: &mut [ImportUsage],
+        check_declarations: bool,
     ) -> Result<(), String> {
         // All occurrence and symbol handles, including borrowed strings, are
         // valid until the record reader's synchronous callback returns.
@@ -84,10 +84,18 @@ impl Symbols {
             let symbol = indexstore_occurrence_get_symbol(occ);
             let usr = indexstore_symbol_get_usr(symbol);
             let usr = usr.bytes();
-            if usr.is_empty() {
+            let kind = indexstore_symbol_get_kind(symbol);
+            if roles & REFERENCE != 0 && !imports.is_empty() {
+                let name = indexstore_symbol_get_name(symbol);
+                let (mut line, mut column) = (0, 0);
+                indexstore_occurrence_get_line_col(occ, &mut line, &mut column);
+                for usage in imports {
+                    usage.record(usr, kind, name.bytes(), line, column);
+                }
+            }
+            if !check_declarations || usr.is_empty() {
                 return Ok(());
             }
-            let kind = indexstore_symbol_get_kind(symbol);
             if roles == REFERENCE
                 && matches!(kind, kind::ENUM..=kind::PROTOCOL | kind::TYPE_ALIAS)
                 && !has_external_file
@@ -199,11 +207,15 @@ impl Symbols {
 }
 
 type Timestamp = (i64, i64);
-type RecordPaths = HashMap<PathBuf, Timestamp>;
+#[derive(Default)]
+struct Record {
+    paths: HashMap<PathBuf, Timestamp>,
+    modules: HashSet<String>,
+}
 
 #[derive(Default)]
 struct Units {
-    records: HashMap<Vec<u8>, RecordPaths>,
+    records: HashMap<Vec<u8>, Record>,
     present: HashSet<Vec<u8>>,
     required: HashSet<Vec<u8>>,
 }
@@ -223,6 +235,8 @@ impl Units {
             }
             let (mut sec, mut ns) = (0, 0);
             indexstore_unit_reader_get_modification_time(unit.raw, &mut sec, &mut ns);
+            let module = indexstore_unit_reader_get_module_name(unit.raw);
+            let module = std::str::from_utf8(module.bytes()).map_err(|e| e.to_string())?;
             let working_dir = indexstore_unit_reader_get_working_dir(unit.raw);
             let working_dir = Path::new(OsStr::from_bytes(working_dir.bytes()));
             visit(
@@ -239,9 +253,12 @@ impl Units {
                         DEPENDENCY_RECORD => {
                             let path = indexstore_unit_dependency_get_filepath(dep);
                             let path = working_dir.join(OsStr::from_bytes(path.bytes()));
-                            self.records
-                                .entry(dep_name.bytes().to_vec())
-                                .or_default()
+                            let record = self.records.entry(dep_name.bytes().to_vec()).or_default();
+                            if !module.is_empty() && !record.modules.contains(module) {
+                                record.modules.insert(module.to_owned());
+                            }
+                            record
+                                .paths
                                 .entry(path)
                                 .and_modify(|mtime| *mtime = (*mtime).min((sec, ns)))
                                 .or_insert((sec, ns));
@@ -301,7 +318,12 @@ fn project_source(
     Ok(Some(real))
 }
 
-pub fn read(index_store: &Path, project_root: &Path) -> Result<Vec<Declaration>, String> {
+pub fn read(
+    index_store: &Path,
+    project_root: &Path,
+    declarations: bool,
+    imports: bool,
+) -> Result<BTreeMap<PathBuf, IndexedFile>, String> {
     let path = CString::new(index_store.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
     let store = Owned::open(
         |err| unsafe { indexstore_store_create(path.as_ptr(), err) },
@@ -328,16 +350,32 @@ pub fn read(index_store: &Path, project_root: &Path) -> Result<Vec<Declaration>,
     }
 
     let mut symbols = Symbols::default();
-    let mut has_project_record = false;
-    for (name, files) in units.records {
+    let mut sources = BTreeMap::<PathBuf, IndexedFile>::new();
+    for (name, record_info) in units.records {
         let mut paths = Vec::new();
-        let file_count = files.len();
-        for (path, timestamp) in files {
+        let mut has_external_file = false;
+        for (path, timestamp) in record_info.paths {
             if let Some(path) = project_source(&path, project_root, timestamp)? {
                 paths.push(path);
+            } else {
+                has_external_file = true;
             }
         }
-        has_project_record |= !paths.is_empty();
+        paths.sort_unstable();
+        paths.dedup();
+        let mut usage = Vec::new();
+        for path in &paths {
+            let file = sources.entry(path.clone()).or_default();
+            if imports {
+                for module in &record_info.modules {
+                    file.imports.declared_in(module);
+                }
+                usage.push(std::mem::take(&mut file.imports));
+            }
+        }
+        if !declarations && (!imports || paths.is_empty()) {
+            continue;
+        }
         let name = CString::new(name).map_err(|e| e.to_string())?;
         let record = Owned::open(
             |err| unsafe { indexstore_record_reader_create(store.raw, name.as_ptr(), err) },
@@ -347,8 +385,11 @@ pub fn read(index_store: &Path, project_root: &Path) -> Result<Vec<Declaration>,
 
         let result = visit(
             |ctx, f| unsafe { indexstore_record_reader_occurrences_apply_f(record.raw, ctx, f) },
-            |occ| symbols.occurrence(occ, &paths, paths.len() < file_count),
+            |occ| symbols.occurrence(occ, &paths, has_external_file, &mut usage, declarations),
         );
+        for (path, usage) in paths.iter().zip(usage) {
+            sources.get_mut(path).unwrap().imports = usage;
+        }
         if let Err(err) = result {
             // libIndexStore also returns false for a valid record with no
             // occurrence block (e.g. a Swift file containing only comments).
@@ -367,20 +408,12 @@ pub fn read(index_store: &Path, project_root: &Path) -> Result<Vec<Declaration>,
             }
         }
     }
-    if !has_project_record {
+    if sources.is_empty() {
         return Err(format!(
             "no indexed Swift sources under {}",
             project_root.display()
         ));
     }
-    symbols.resolve_bare_types()?;
-    Ok(symbols
-        .declarations
-        .into_iter()
-        .filter_map(|(declaration, usrs)| {
-            usrs.iter()
-                .all(|usr| !symbols.used.contains(usr))
-                .then_some(declaration)
-        })
-        .collect())
+    symbols.distribute(&mut sources);
+    Ok(sources)
 }

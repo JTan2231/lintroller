@@ -5,23 +5,29 @@ use tree_sitter::{Node, Parser, Point, Tree};
 pub struct SourceFile {
     source: String,
     tree: Tree,
-    disabled: Vec<bool>,
 }
 
 impl SourceFile {
-    pub fn read(path: &Path) -> Result<Self, String> {
-        let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    pub fn parser() -> Result<Parser, String> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_swift::LANGUAGE.into())
             .map_err(|error| error.to_string())?;
+        Ok(parser)
+    }
+
+    pub fn read(path: &Path, parser: &mut Parser) -> Result<Self, String> {
+        let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
         let tree = parser.parse(&source, None).ok_or("could not parse Swift")?;
-        let disabled = disabled_lines(&source, &tree);
-        Ok(Self {
-            source,
-            tree,
-            disabled,
-        })
+        Ok(Self { source, tree })
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn root(&self) -> Node<'_> {
+        self.tree.root_node()
     }
 
     // Swift may emit a bare reference for the nominal type of an empty
@@ -89,9 +95,6 @@ impl SourceFile {
                 && token_start.column + 1 == col)
         {
             return Err(stale());
-        }
-        if self.disabled.get(row) == Some(&true) {
-            return Ok(false);
         }
 
         let Some(decl) = enclosing_declaration(leaf) else {
@@ -241,58 +244,4 @@ impl SourceFile {
 fn enclosing_declaration(node: Node<'_>) -> Option<Node<'_>> {
     std::iter::successors(node.parent(), |parent| parent.parent())
         .find(|parent| parent.kind().ends_with("_declaration"))
-}
-
-// Verify the marker belongs to a Swift comment, so a string literal containing
-// an example directive cannot accidentally silence a finding.
-fn disabled_lines(source: &str, tree: &Tree) -> Vec<bool> {
-    if !source.contains("swiftlint:") {
-        return Vec::new();
-    }
-    let mut result = Vec::new();
-    let mut region_disabled = false;
-    let mut next_line = None;
-    for (row, line) in source.lines().enumerate() {
-        result.push(next_line.take().unwrap_or(region_disabled));
-        let Some(col) = line.find("swiftlint:") else {
-            continue;
-        };
-        let point = Point::new(row, col);
-        let Some(node) = tree
-            .root_node()
-            .descendant_for_point_range(point, Point::new(row, col + 1))
-        else {
-            continue;
-        };
-        if !matches!(node.kind(), "comment" | "multiline_comment") {
-            continue;
-        }
-        let mut tokens = line[col + "swiftlint:".len()..].split_whitespace();
-        let Some(command) = tokens.next() else {
-            continue;
-        };
-        if !tokens
-            .take_while(|word| *word != "-")
-            .any(|word| matches!(word, "unused_declaration" | "all"))
-        {
-            continue;
-        }
-        let (action, scope) = command.split_once(':').unwrap_or((command, ""));
-        let disabled = match action {
-            "disable" => true,
-            "enable" => false,
-            _ => continue,
-        };
-        match scope {
-            "this" => result[row] = disabled,
-            "previous" if row > 0 => result[row - 1] = disabled,
-            "next" => next_line = Some(disabled),
-            "" => {
-                region_disabled = disabled;
-                result[row] = disabled;
-            }
-            _ => {}
-        }
-    }
-    result
 }

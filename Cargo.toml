@@ -2,7 +2,7 @@
 name = "lintroller"
 version = "0.1.0"
 edition = "2024"
-description = "Find unreferenced Swift declarations in a compiler index store"
+description = "Lint Swift source and compiler index records with SwiftLint rules"
 
 [[bin]]
 name = "lintroller"
@@ -13,3 +13,4 @@ test = false
 clap = { version = "4.5", features = ["derive"] }
 tree-sitter = "0.26"
 tree-sitter-swift = "0.7.4"
+unicode-segmentation = "1"

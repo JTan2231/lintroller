@@ -114,6 +114,7 @@ public func launch() {
 
     let scan_start = Instant::now();
     let scan = Command::new(env!("CARGO_BIN_EXE_lintroller"))
+        .args(["--rules", "unused_declaration"])
         .arg("--index-store")
         .arg(&index)
         .arg("--project-root")
