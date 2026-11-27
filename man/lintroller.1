@@ -1,0 +1,111 @@
+.TH LINTROLLER 1 2026-11-26 lintroller "User Commands"
+.SH NAME
+lintroller \- lint Swift sources using a compiler index
+.SH SYNOPSIS
+.B lintroller
+.BI \-\-index\-store " DIR"
+.BI \-\-project\-root " DIR"
+.RB [ \-\-rules
+.IR ID[,ID...] ]
+.br
+.B lintroller \-\-help
+.br
+.B lintroller \-\-version
+.SH DESCRIPTION
+.B lintroller
+runs SwiftLint rules on Swift source files recorded in an existing compiler
+index. The
+.B unused_declaration
+and
+.B unused_import
+rules also use compiler symbol references.
+.PP
+Rules use built-in settings. Project settings in
+.I .swiftlint.yml
+are ignored. Source comments recognize
+.BR swiftlint:disable ,
+.BR swiftlint:enable ,
+the rule selector
+.BR all ,
+and the scopes
+.BR :previous ,
+.BR :this ,
+and
+.BR :next .
+The superfluous-disable check considers only rules selected for the run.
+.SH OPTIONS
+.TP
+.BI \-\-index\-store " DIR"
+Read the compiler index store from
+.IR DIR .
+Use the directory passed to
+.BR "swiftc \-index\-store\-path" ,
+which contains the versioned store directory, typically
+.IR v5/ .
+Required for a scan.
+.TP
+.BI \-\-project\-root " DIR"
+Report findings for indexed Swift sources under
+.IR DIR .
+Required for a scan.
+.TP
+.BI \-\-rules " ID[,ID...]"
+Run the specified rules. Supply a comma-separated list or repeat the option.
+By default, all supported rules run, including SwiftLint opt-in rules.
+See
+.B \-\-help
+for the supported identifiers.
+.TP
+.BR \-h ", " \-\-help
+Print usage and supported rule identifiers.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.SH INDEX COVERAGE
+Use a fresh index from a successful build that includes all targets and
+configurations whose references should count. Keep sources at their indexed
+paths, and rebuild the index after editing or moving them.
+.PP
+For
+.BR unused_declaration ,
+indexed callers outside the project root and under
+.IR .build ,
+.IR .swiftpm ,
+or
+.I DerivedData
+can count as uses. Sources at those locations produce no findings.
+.SH DIAGNOSTICS
+Each finding is written to standard output on one line in the following format.
+.PP
+.EX
+path:line:column: error: message (rule)
+.EE
+.PP
+Paths are relative to the project root. Line numbers and UTF-8 byte columns
+start at one. Command and scan errors are written to standard error.
+.SH EXIT STATUS
+.TP
+.B 0
+The scan completed without findings, or help or version information was printed.
+.TP
+.B 1
+The scan completed with findings.
+.TP
+.B 2
+The arguments were invalid or the scan failed.
+.SH EXAMPLES
+From a Swift package directory, build an index that includes test callers and
+run all supported rules.
+.PP
+.EX
+swift build \-\-build\-tests \-\-enable\-index\-store
+lintroller \-\-index\-store "$(swift build \-\-show\-bin\-path)/index/store" \e
+    \-\-project\-root .
+.EE
+.PP
+Use an existing index to check only for unused declarations and imports.
+.PP
+.EX
+lintroller \-\-index\-store /path/to/index/store \-\-project\-root . \e
+    \-\-rules unused_declaration,unused_import
+.EE

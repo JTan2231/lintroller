@@ -4,11 +4,13 @@
 
 ## Installation
 
-From a checkout, run `./install.sh`. The script builds from source and installs `lintroller` in `$HOME/.local/bin` using your user account. If your shell cannot find `lintroller`, run the following in a POSIX shell. Add the same line to your shell’s startup file to keep it in future sessions.
+From a checkout, run `./install.sh`. The script builds from source and installs `lintroller` in `$HOME/.local/bin` and its manual in `$HOME/.local/share/man/man1` using your user account. If your shell cannot find `lintroller`, run the following in a POSIX shell. Add the same line to your shell’s startup file to keep it in future sessions.
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+Read the manual with `man lintroller`. If `man` does not find it, run `man -M "$HOME/.local/share/man" lintroller`.
 
 You need Rust and Cargo, a C compiler, and Swift’s `libIndexStore`. The build finds the library using `xcrun` on macOS or `swiftc` on `PATH` on other Unix systems. If `swiftc` is unavailable, pass the absolute path to the directory containing the library. Keep that library in place for the installed CLI.
 
